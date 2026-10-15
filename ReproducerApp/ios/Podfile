@@ -8,11 +8,14 @@ require Pod::Executable.execute_command('node', ['-p',
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
-linkage = ENV['USE_FRAMEWORKS']
-if linkage != nil
-  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
-  use_frameworks! :linkage => linkage.to_sym
-end
+# facebook/react-native#59116 — Debug + static CocoaPods + from-source React-hermes.
+# Prebuilt RNCore hides the failure (CDP refs are already satisfied inside React.xcframework).
+# Building RN from source compiles React-hermes with HERMES_ENABLE_DEBUGGER=1 so a Release
+# hermesvm (no CDP) fails the app link with undefined CDPDebugAPI / CDPAgent symbols.
+ENV['RCT_USE_PREBUILT_RNCORE'] = '0'
+ENV['RCT_USE_RN_DEP'] = '0'
+
+use_frameworks! :linkage => :static
 
 target 'ReproducerApp' do
   config = use_native_modules!
@@ -30,5 +33,24 @@ target 'ReproducerApp' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # Reproduce the CONFIG mis-detect from hermes-engine.podspec: the Replace Hermes
+    # script greps GCC_PREPROCESSOR_DEFINITIONS for DEBUG=1. On many static CocoaPods
+    # Debug setups that def never lands on hermes-engine (xcconfig is only COCOAPODS=1).
+    # Fresh Xcode still injects DEBUG=1 via $(inherited) from the Pods project, which
+    # masks the bug locally — strip it here so the stock script keeps CONFIG=Release
+    # while React-hermes still compiles with HERMES_ENABLE_DEBUGGER=1.
+    # Do NOT apply the RNFB workaround that keys off $CONFIGURATION.
+    installer.pods_project.targets.each do |target|
+      next unless target.name == 'hermes-engine'
+
+      target.build_configurations.each do |bc|
+        next unless bc.name == 'Debug'
+
+        # No $(inherited): that is how DEBUG=1 re-enters from the Pods project and
+        # masks the stock DEBUG=1 grep. Leave only COCOAPODS=1 on hermes-engine Debug.
+        bc.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = ['COCOAPODS=1']
+      end
+    end
   end
 end
